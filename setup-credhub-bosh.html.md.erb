@@ -3,7 +3,7 @@ title: Setting Up and Deploying CredHub with BOSH
 owner: CredHub
 ---
 
-<% if vars.platform_code == 'CF' %>
+
 <div class="quick-links">
     <ul>
         <li><a href="#how-it-works">How It Works</a></li>
@@ -352,8 +352,8 @@ To use CredHub:
                       - ((generated/ssh\_key))
     ```
 
-<% else %>
+ 
 
-<%= vars.bosh_credhub_setup %>
+{{ vars.bosh_credhub_setup  }}
 
-<% end %>
+ 
