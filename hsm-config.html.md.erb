@@ -1,0 +1,423 @@
+---
+title: Using Hardware Security Modules with CredHub
+owner: CredHub
+---
+
+This topic describes how to configure [AWS CloudHSM](https://aws.amazon.com/cloudhsm) devices to work with CredHub.
+
+<p class="note"><strong>Note:</strong> If you use a <a href="https://safenet.gemalto.com/data-encryption/hardware-security-modules-hsms/safenet-network-hsm/">Luna SafeNet HSM</a>, rather than AWS, skip over the device allocation portion and start with <a href="#initialize-and-configure">Initialize and Configure New HSMs</a>.</p>
+
+If you store critical data in CredHub, configuring at least two Hardware Security Modules (HSMs) replicates your keys and provides redundancy and security in the event of an HSM failure. With a single HSM, device failure renders your CredHub data inaccessible.
+
+
+## <a id='checklist'></a> Preparation Checklist
+
+As you follow these procedures, you should collect or create these resources:
+
+* The name of your encryption key
+
+* Your HSM certificate
+
+* Your HSM partition name and password
+
+* Your client certificate and private key
+
+* Your HSM partition serial numbers
+
+
+## <a id='create-new-aws'></a> Create New AWS CloudHSMs
+
+These sections describe how to create new AWS CloudHSMs.
+
+### <a id='aws-env-prereq'></a> AWS Environment Prerequisites
+
+<p class="note"><strong>Note:</strong> For high availability (HA), use at least two HSM instances. AWS documentation recommends that you also use a subnet for a publicly available Control Instance, but for this product that is unnecessary. CredHub acts as a Control Instance.</p>
+
+Before creating new AWS CloudHSMs, you must have:
+
+* A Virtual Private Cloud (VPC)
+
+* **For each HSM instance:** One private subnet in its own Availability Zone (AZ)
+
+* An IAM role for the HSM with a policy equivalent to `AWSCloudHSMRole` policy
+
+* The Security Group must allow traffic from the CredHub security group on ports 22 (SSH) and 1792 (HSM)
+
+### <a id='create-new-devices'></a> Create New Devices
+
+To create new AWS CloudHSMs:
+
+1. Install the AWS CLI from [AWS CloudHSM Command Line Tools](https://docs.aws.amazon.com/cloudhsm/latest/userguide/command-line-tools.html) in the AWS documentation.
+
+1. Create SSH keypairs for all planned HSMs by running:
+
+    ```
+    ssh-keygen -b 4096 -t rsa -N PASSWORD -f PATH-TO-SSH-KEY.pem
+    ```
+    Where:
+    * `PASSWORD` is the password you create for the SSH key.
+    * `PATH-TO-SSH-KEY` is the filepath of your SSH key PEM file.
+
+1. Create the `cloudhsm.conf` file with these values:
+
+    ```
+    aws_access_key_id=ACCESS-KEY-ID
+    aws_secret_access_key=SECRET-ACCESS-KEY
+    aws_region=AWS-REGION
+    ```
+    Where:
+    * `ACCESS-KEY-ID` is your AWS access key ID.
+    * `SECRET-ACCESS-KEY` is your AWS secret access key.
+    * `AWS-REGION` is your AWS region.
+
+1. To create each HSM and place it in the appropriate subnet, run:
+
+    ```
+    cloudhsm create-hsm \
+      --conf_file PATH-TO-CLOUDHSM.conf \
+      --subnet-id SUBNET-ID \
+      --ssh-public-key-file PATH-TO-SSH-KEY.pem.pub \
+      --iam-role-arn IAM-HSN-ROLE-ARN
+    ```
+    Where:
+    * `PATH-TO-CLOUDHSM` is the filepath to your `cloudhsm.conf` file.
+    * `SUBNET-ID` is the ID of the subnet in which you want to place your HSM.
+    * `PATH-TO-SSH-KEY` is the filepath to your public SSH key PEM key.
+    * `IAM-HSM-ROLE-ARN` is the Amazon Resource Name (ARN) of your HSM's IAM role. For more information, see [IAM ARNs](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html#identifiers-arns) in _IAM Identifiers_ in the AWS documentation.
+
+1. Assign the security group to each HSM:
+    1. Retrieve the Elastic Network Interface ID `EniID` of the HSM by running:
+
+        ```
+        cloudhsm describe-hsm -H HSM-ARN -r AWS-REGION
+        ```
+        Where:
+        * `HSM-ARN` is the ARN of your HSM.
+        * `AWS-REGION` is the AWS region of your HSM.
+    1. Edit the network interface to assign the security group by running:
+
+        ```
+        aws ec2 modify-network-interface-attribute \
+          --network-interface-id ENI-ID \
+          --groups SECURITY-GROUP-ID
+        ```
+        Where:
+        * `ENI-ID` is the `EniID` you retrived in the previous step.
+        * `SECURITY-GROUP-ID` is the ID of the security group you want to assign to this HSM.
+
+
+## <a id="initialize-and-configure"></a> Initialize and Configure New HSMs
+
+These sections describe the steps to initialize and configure your HSMs, whether they are Luna HSMs or AWS CloudHSMs. You must follow this procedure for each HSM you created.
+
+### <a id='ssh'></a> SSH Onto the HSM
+
+To SSH onto the HSM you want to initialize and configure:
+
+1. Retrieve the IP address of your HSM by running:
+
+    ```
+    cloudhsm describe-hsm -H HSM-ARN -r AWS-REGION
+    ```
+    Where:
+    * `HSM-ARN` is the ARN of your HSM.
+    * `AWS-REGION` is the AWS region of your HSM.
+
+1. SSH onto the HSM by running:
+
+    ```
+    ssh -i path/to/ssh-key.pem manager@HSM-IP
+    ```
+    Where `HSM-IP` is the IP address you retrieved in the previous step.
+
+### <a id='initialize-and-set-policies'></a> Initialize and Set Policies
+
+To initialize your HSM and set its policies:
+
+1. Initialize the HSM and create an admin password when prompted by running:
+
+    ```
+    lunash:> hsm init -label LABEL
+    ```
+    Where `LABEL` is the label you want to give the HSM.
+    <br>
+    <br>
+    Initialize all HSMs into the same cloning domain to guarantee high availability for your <%= vars.platform_name %> deployment.
+
+1. Log in to the HSM using the password you just created by running:
+
+    ```
+    lunash:> hsm login
+    ```
+
+1. Confirm that only FIPS algorithms are enabled. Run:
+
+    ```
+    lunash:> hsm changePolicy -policy 12 -value 0
+    ```
+
+1. To confirm that `Allow cloning` and `Allow network replication` policy values are set to `On` on the HSM, run:
+
+    ```
+    hsm showPolicies
+    ```
+    If these values are not set to `On`, change them by running:
+
+    ```
+    lunash:> hsm changePolicy -policy POLICY-CODE -value 1
+    ```
+    Where `POLICY-CODE` is the numerical code of the `Allow cloning` or `Allow network replication` policy.
+
+1. Validate that the `SO can reset partition PIN` is set correctly. If it is set to `Off`, consecutive failed login attempts permanently erase the partition once the failure count hits the configured threshold. If it is set to `On`, the partition locks once the threshold is met. An HSM admin must unlock the partition, but no data is lost. To set the policy to `On`, run:
+
+    ```
+    lunash:> hsm changePolicy -policy 15 -value 1
+    ```
+
+### <a id="retrieve-hsm-certificate"></a> Retrieve HSM Certificate
+
+To retrieve your HSM certificate:
+
+1. Run:
+
+    ```
+    scp -i path/to/ssh-key.pem \
+      manager@HSM-IP-ADDRESS:server.pem \
+      HSM-IP-ADDRESS.pem
+    ```
+    Where `HSM-IP-ADDRESS` is the IP address of your HSM.
+
+BOSH CredHub uses this certificate to validate the identity of the HSM when connecting to it.
+
+### <a id="create-hsm-partition"></a> Create an HSM Partition
+
+To create an HSM partition to hold the encryption keys:
+
+1. Run:
+
+    ```
+    lunash:> partition create -partition PARTITION-NAME -domain CLONING-DOMAIN
+    ```
+    Where:
+    * `PARTITION-NAME` is the name you give the partition.
+    * `CLONING-DOMAIN` is the cloning domain of the HSM.
+
+1. When prompted to do so, create a password for the partition. The partition password must be the same for all partitions in the highly available partition group.
+
+1. To retrieve the partition serial number, run:
+
+    ```
+    lunash:> partition show -partition PARTITION-NAME
+    ```
+    Where `PARTITION-NAME` is the name of the partition you created.
+
+1. Record the `Partition SN` shown in the output of the command you ran in the previous step.
+
+
+## <a id='create-register-hsm'></a> Create and Register HSM Clients
+
+Clients that communicate with the HSM must provide a client certificate to establish a client-authenticated session. You must set up each client's certificate on the HSM and assign access rights for your partition.
+
+### <a id='network-trust-link'></a> Establish a Network Trust Link Between Client and HSMs
+
+To establish a network trust link between a client and your HSMs:
+
+1. Create a certificate for the client by running:
+
+    ```
+    openssl req \
+      -x509   \
+      -newkey rsa:4096 \
+      -days   NUMBER-OF-DAYS \
+      -sha256 \
+      -nodes  \
+      -subj   "/CN=CLIENT-HOSTNAME-OR-IP" \
+      -keyout CLIENT-HOSTNAME-OR-IP.pem \
+      -out    CLIENT-HOSTNAME-OR-IP.pem
+    ```
+    Where:
+    * `NUMBER-OF-DAYS` is the number of days you want the network trust link to be valid.
+    * `CLIENT-HOSTNAME-OR-IP` is the hostname or IP address of the client.
+
+1. Copy the client certificate to your HSM by running:
+
+    ```
+    scp -i path/to/ssh-key.pem \
+      CLIENT-HOSTNAME-OR-IP.pem \
+      manager@HSM-IP:CLIENT-HOSTNAME-OR-IP.pem
+    ```
+    Where `CLIENT-HOSTNAME-OR-IP` is the hostname or IP address of the client.
+
+### <a id='register'></a> Register HSM Client Host and Partitions
+
+To register a client host and partitions for your HSM:
+
+1. Create a client by running:
+
+    ```
+    lunash:> client register -client CLIENT-NAME -hostname CLIENT-HOSTNAME
+    ```
+    Where:
+    * `CLIENT-NAME` is the name of the client.
+    * `CLIENT-HOSTNAME` is the hostname of your planned CredHub instances.
+
+1. (Optional) If you are only planning to run one CredHub instance, you can also register a client with the planned CredHub IP address by running:
+
+    ```
+    lunash:> client register -client CLIENT-NAME -ip CLIENT-IP-ADDRESS
+    ```
+    Where:
+    * `CLIENT-NAME` is the name of the client.
+    * `CLIENT-IP-ADDRESS` is the IP address of your planned CredHub instance.
+
+1. Assign the partition created in the previous section to the client by running:
+
+    ```
+    lunash:> client assignPartition -client CLIENT-NAME -partition PARTITION-NAME
+    ```
+    Where:
+    * `CLIENT-NAME` is the name of the client.
+    * `PARTITION-NAME` is the name of the partition you created.
+
+
+## <a id="hsm-encryption-keys"></a> Set HSM Encryption Keys
+
+Set which key used for encryption operations by defining the encryption key name in the deploy manifest. By default, a key that exists on the HSM is used for encryption operations. If a key does not exist on the HSM, CredHub creates it automatically in the referenced partition.
+
+When you generate a new key, review the list of keys on each HSM to validate that key replication is occurring. If new keys do not propagate among the HSMs, you could get locked out of HSMs.
+
+To review stored keys on a partition:
+
+1. Run:
+
+    ```
+    lunash:> partition showContents -partition PARTITION-NAME
+    ```
+    Where `PARTITION-NAME` is the name of the partition on which your keys are stored.
+
+
+## <a id='ready-deployment'></a> Ready for Deployment
+
+Now you can deploy CredHub with your new HSMs.
+
+Edit your manifest as shown below:
+
+```
+credhub:
+  properties:
+    encryption:
+      keys:
+        - provider_name: primary
+          encryption_key_name: ENCRYPTION-KEY-NAME
+          active: true
+      providers:
+        - name: primary
+          type: hsm
+          partition: PARTITION-NAME
+          partition_password: PARTITION-PASSWORD
+          client_certificate: CLIENT-CERTIFICATE
+          client_key: CLIENT-PRIVATE-KEY
+          servers:
+          - host: 10.0.0.1
+            port: 1792
+            certificate: HSM-CERTIFICATE
+            partition_serial_number: PARTITION-SERIAL-NUMBER
+          - host: 10.0.0.10
+            port: 1792
+            certificate: HSM-CERTIFICATE
+            partition_serial_number: PARTITION-SERIAL-NUMBER
+```
+
+Where:
+
+* `ENCRYPTION-KEY-NAME` is the encryption key you set in [Set HSM Encryption Keys](#hsm-encryption-keys).
+
+* `PARTITION-NAME` is the name of the partition you created in [Create an HSM Partition](#create-hsm-partition).
+
+* `PARTITION-PASSWORD` is the password of the partition you created in [Create an HSM Partition](#create-hsm-partition).
+
+* `CLIENT-CERTIFICATE` is the client certificate you created in [Establish a Network Trust Link Between Client and HSMs](#establish-network-trust-link).
+
+* `CLIENT-PRIVATE-KEY` is the private key you created in [Establish a Network Trust Link Between Client and HSMs](#establish-network-trust-link).
+
+* `HSM-CERTIFICATE` is one of the HSM certificates you retrieved in [Retrieve HSM Certificate](#retrieve-hsm-certificate).
+
+* `PARTITION-SERIAL-NUMBER` is the partition serial number you retrieved in [Create an HSM Partition](#create-hsm-partition).
+
+
+## <a id='renew-rotate'></a> Renew or Rotate a Client Certificate
+
+The generated client certificate has a fixed expiration date after which the HSM no longer accepts it. To rotate or renew this certificate at any time:
+
+1. Generate a new certificate for the client by running:
+
+    ```
+    openssl req \
+      -x509   \
+      -newkey rsa:4096 \
+      -days   NUMBER-OF-DAYS \
+      -sha256 \
+      -nodes  \
+      -subj   "/CN=CLIENT-HOSTNAME-OR-IP" \
+      -keyout CLIENT-HOSTNAME-OR-IPKey.pem \
+      -out    CLIENT-HOSTNAME-OR-IP.pem
+    ```
+    Where:
+    * `NUMBER-OF-DAYS` is the number of days you want the network trust link to be valid.
+    * `CLIENT-HOSTNAME-OR-IP` is the hostname or IP address of the client.
+
+1. Copy the client certificate to each HSM by running:
+
+    ```
+    scp -i path/to/ssh-key.pem \
+      CLIENT-HOSTNAME-OR-IP.pem \
+      manager@HSM-IP:CLIENT-HOSTNAME-OR-IP.pem
+    ```
+    Where `CLIENT-HOSTNAME-OR-IP` is the hostname or IP address of the client.
+
+1. (Optional) Review the client's partition assignments by running:
+
+    ```
+    lunash:> client show -client CLIENT-NAME
+    ```
+    Where `CLIENT-NAME` is the name of the client.
+
+1. Remove the existing client by running:
+
+    ```
+    lunash:> client delete -client CLIENT-NAME
+    ```
+    Where `CLIENT-NAME` is the name of the client.
+    <p class="note"><strong>Note:</strong> When you remove the existing client, all partition assignments are deleted.</p>
+
+1. Re-register the client by running:
+
+    ```
+    lunash:> client register -client CLIENT-NAME -ip CLIENT-IP
+    ```
+    Where:
+    * `CLIENT-NAME` is the name of the client.
+    * `CLIENT-IP` is the IP address of the client.
+
+1. Re-assign partition assignments by running:
+
+    ```
+    lunash:> client assignPartition -client CLIENT-NAME -partition PARTITION-NAME
+    ```
+    Where:
+    * `CLIENT-NAME` is the name of the client.
+    * `PARTITION-NAME` is the name of the partition to which the client is assigned.
+
+1. (Optional) Validate the new certificate fingerprint by running:
+
+    ```
+    lunash:> client fingerprint -client CLIENT-NAME
+    ```
+    Where `CLIENT-NAME` is the name of the client.
+    <br>
+    <br>
+    If you need to, you can compare the fingerprint to your locally stored certificate by running:
+
+    ```
+    openssl x509 -in clientcert.pem -outform DER | md5sum
+    ```
